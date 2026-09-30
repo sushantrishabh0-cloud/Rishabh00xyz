@@ -1,0 +1,915 @@
+from flask import Flask, request, jsonify, render_template_string
+import sqlite3
+import uuid
+import os
+
+app = Flask(__name__)
+
+DB = "simmiii.db"
+UPLOADS = "uploads"
+
+os.makedirs(UPLOADS, exist_ok=True)
+
+
+# =========================
+# DATABASE
+# =========================
+
+def database():
+    con = sqlite3.connect(DB)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def setup_database():
+
+    con = database()
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            simmiii_id TEXT UNIQUE
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT,
+            receiver TEXT,
+            message TEXT,
+            photo TEXT
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT UNIQUE,
+            group_name TEXT
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS group_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT,
+            sender TEXT,
+            message TEXT,
+            photo TEXT
+        )
+    """)
+
+    con.commit()
+    con.close()
+
+
+# =========================
+# CREATE USER
+# =========================
+
+@app.route("/create_user")
+def create_user():
+
+    simmiii_id = "SIM-" + uuid.uuid4().hex[:8].upper()
+
+    con = database()
+
+    con.execute(
+        "INSERT INTO users (simmiii_id) VALUES (?)",
+        (simmiii_id,)
+    )
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "id": simmiii_id
+    })
+
+
+# =========================
+# SEND MESSAGE
+# =========================
+
+@app.route("/send_message", methods=["POST"])
+def send_message():
+
+    sender = request.form.get("sender")
+    receiver = request.form.get("receiver")
+    message = request.form.get("message", "")
+
+    photo = ""
+
+    if "photo" in request.files:
+
+        file = request.files["photo"]
+
+        if file.filename:
+
+            filename = (
+                uuid.uuid4().hex
+                + "_"
+                + file.filename
+            )
+
+            path = os.path.join(
+                UPLOADS,
+                filename
+            )
+
+            file.save(path)
+
+            photo = "/uploads/" + filename
+
+    con = database()
+
+    con.execute("""
+        INSERT INTO messages
+        (sender, receiver, message, photo)
+        VALUES (?, ?, ?, ?)
+    """, (
+        sender,
+        receiver,
+        message,
+        photo
+    ))
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "success": True
+    })
+
+
+# =========================
+# GET CHAT
+# =========================
+
+@app.route("/chat/<sender>/<receiver>")
+def get_chat(sender, receiver):
+
+    con = database()
+
+    messages = con.execute("""
+        SELECT *
+        FROM messages
+        WHERE
+        (sender = ? AND receiver = ?)
+        OR
+        (sender = ? AND receiver = ?)
+        ORDER BY id ASC
+    """, (
+        sender,
+        receiver,
+        receiver,
+        sender
+    )).fetchall()
+
+    con.close()
+
+    return jsonify([
+        dict(x) for x in messages
+    ])
+
+
+# =========================
+# CREATE GROUP
+# =========================
+
+@app.route("/create_group", methods=["POST"])
+def create_group():
+
+    name = request.form.get(
+        "group_name",
+        "My Group"
+    )
+
+    group_id = (
+        "GRP-"
+        + uuid.uuid4().hex[:8].upper()
+    )
+
+    con = database()
+
+    con.execute("""
+        INSERT INTO groups
+        (group_id, group_name)
+        VALUES (?, ?)
+    """, (
+        group_id,
+        name
+    ))
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "success": True,
+        "group_id": group_id,
+        "name": name
+    })
+
+
+# =========================
+# GROUP LIST
+# =========================
+
+@app.route("/groups")
+def get_groups():
+
+    con = database()
+
+    groups = con.execute(
+        "SELECT * FROM groups ORDER BY id DESC"
+    ).fetchall()
+
+    con.close()
+
+    return jsonify([
+        dict(x) for x in groups
+    ])
+
+
+# =========================
+# GROUP MESSAGE
+# =========================
+
+@app.route("/group_message", methods=["POST"])
+def group_message():
+
+    sender = request.form.get("sender")
+    group_id = request.form.get("group_id")
+    message = request.form.get("message", "")
+
+    photo = ""
+
+    if "photo" in request.files:
+
+        file = request.files["photo"]
+
+        if file.filename:
+
+            filename = (
+                uuid.uuid4().hex
+                + "_"
+                + file.filename
+            )
+
+            path = os.path.join(
+                UPLOADS,
+                filename
+            )
+
+            file.save(path)
+
+            photo = "/uploads/" + filename
+
+    con = database()
+
+    con.execute("""
+        INSERT INTO group_messages
+        (group_id, sender, message, photo)
+        VALUES (?, ?, ?, ?)
+    """, (
+        group_id,
+        sender,
+        message,
+        photo
+    ))
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "success": True
+    })
+
+
+# =========================
+# GROUP CHAT
+# =========================
+
+@app.route("/group_chat/<group_id>")
+def group_chat(group_id):
+
+    con = database()
+
+    messages = con.execute("""
+        SELECT *
+        FROM group_messages
+        WHERE group_id = ?
+        ORDER BY id ASC
+    """, (group_id,)).fetchall()
+
+    con.close()
+
+    return jsonify([
+        dict(x) for x in messages
+    ])
+
+
+# =========================
+# WEBSITE
+# =========================
+
+HTML = """
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>Simmiii</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f5f5f7;
+}
+
+.header {
+    background: #6c4cff;
+    color: white;
+    padding: 18px;
+    font-size: 27px;
+    font-weight: bold;
+    text-align: center;
+}
+
+.container {
+    max-width: 650px;
+    margin: auto;
+    padding: 15px;
+}
+
+.card {
+    background: white;
+    padding: 18px;
+    margin-bottom: 15px;
+    border-radius: 18px;
+    box-shadow: 0 4px 15px #0001;
+}
+
+input,
+textarea {
+    width: 100%;
+    padding: 12px;
+    margin: 6px 0;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    font-size: 15px;
+}
+
+button {
+    background: #6c4cff;
+    color: white;
+    border: none;
+    padding: 11px 17px;
+    border-radius: 10px;
+    font-weight: bold;
+    margin-top: 5px;
+}
+
+.message {
+    background: #eeeeee;
+    padding: 10px;
+    margin: 7px 0;
+    border-radius: 10px;
+}
+
+.mine {
+    background: #ddd3ff;
+}
+
+img {
+    max-width: 100%;
+    border-radius: 12px;
+    margin-top: 8px;
+}
+
+.id {
+    font-size: 20px;
+    font-weight: bold;
+    color: #6c4cff;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="header">
+    💜 SIMMIII
+</div>
+
+<div class="container">
+
+
+<!-- USER -->
+
+<div class="card">
+
+<h3>👤 My Simmiii ID</h3>
+
+<div class="id" id="myID">
+Creating...
+</div>
+
+</div>
+
+
+<!-- CHAT -->
+
+<div class="card">
+
+<h3>💬 Chat</h3>
+
+<input
+id="friendID"
+placeholder="Friend's Simmiii ID">
+
+<div id="chat"></div>
+
+<input
+id="message"
+placeholder="Write a message...">
+
+<input
+type="file"
+id="chatPhoto"
+accept="image/*">
+
+<button onclick="sendMessage()">
+Send
+</button>
+
+</div>
+
+
+<!-- GROUP -->
+
+<div class="card">
+
+<h3>👥 Create Group</h3>
+
+<input
+id="groupName"
+placeholder="Group name">
+
+<button onclick="createGroup()">
+Create Group
+</button>
+
+<div id="newGroup"></div>
+
+</div>
+
+
+<!-- GROUP LIST -->
+
+<div class="card">
+
+<h3>👥 Groups</h3>
+
+<button onclick="loadGroups()">
+Refresh Groups
+</button>
+
+<div id="groupList"></div>
+
+</div>
+
+
+<!-- QUESTION -->
+
+<div class="card">
+
+<h3>❓ Question</h3>
+
+<textarea
+id="question"
+rows="4"
+placeholder="Ask your question...">
+</textarea>
+
+<button onclick="askQuestion()">
+Post Question
+</button>
+
+<div id="questionResult"></div>
+
+</div>
+
+
+</div>
+
+
+<script>
+
+
+// ======================
+// USER ID
+// ======================
+
+let myID =
+localStorage.getItem(
+    "simmiii_id"
+);
+
+
+async function makeID() {
+
+    let response =
+        await fetch(
+            "/create_user"
+        );
+
+    let data =
+        await response.json();
+
+    myID = data.id;
+
+    localStorage.setItem(
+        "simmiii_id",
+        myID
+    );
+
+    document.getElementById(
+        "myID"
+    ).innerText = myID;
+}
+
+
+if (!myID) {
+
+    makeID();
+
+} else {
+
+    document.getElementById(
+        "myID"
+    ).innerText = myID;
+
+}
+
+
+// ======================
+// SEND MESSAGE
+// ======================
+
+async function sendMessage() {
+
+    let receiver =
+        document.getElementById(
+            "friendID"
+        ).value;
+
+    let message =
+        document.getElementById(
+            "message"
+        ).value;
+
+    let photo =
+        document.getElementById(
+            "chatPhoto"
+        ).files[0];
+
+
+    if (!receiver) {
+
+        alert(
+            "Friend ID enter karo"
+        );
+
+        return;
+    }
+
+
+    let form =
+        new FormData();
+
+    form.append(
+        "sender",
+        myID
+    );
+
+    form.append(
+        "receiver",
+        receiver
+    );
+
+    form.append(
+        "message",
+        message
+    );
+
+
+    if (photo) {
+
+        form.append(
+            "photo",
+            photo
+        );
+
+    }
+
+
+    await fetch(
+        "/send_message",
+        {
+            method: "POST",
+            body: form
+        }
+    );
+
+
+    document.getElementById(
+        "message"
+    ).value = "";
+
+
+    loadChat();
+}
+
+
+// ======================
+// LOAD CHAT
+// ======================
+
+async function loadChat() {
+
+    let receiver =
+        document.getElementById(
+            "friendID"
+        ).value;
+
+    if (!receiver) return;
+
+
+    let response =
+        await fetch(
+            "/chat/"
+            + myID
+            + "/"
+            + receiver
+        );
+
+
+    let data =
+        await response.json();
+
+
+    let box =
+        document.getElementById(
+            "chat"
+        );
+
+    box.innerHTML = "";
+
+
+    data.forEach(
+        function(m) {
+
+            let div =
+                document.createElement(
+                    "div"
+                );
+
+            div.className =
+                "message "
+                +
+                (
+                    m.sender === myID
+                    ? "mine"
+                    : ""
+                );
+
+
+            div.innerHTML =
+                "<b>"
+                + m.sender
+                + "</b><br>"
+                + m.message;
+
+
+            if (m.photo) {
+
+                div.innerHTML +=
+                    "<br><img src='"
+                    + m.photo
+                    + "'>";
+
+            }
+
+
+            box.appendChild(
+                div
+            );
+
+        }
+    );
+
+}
+
+
+// ======================
+// CREATE GROUP
+// ======================
+
+async function createGroup() {
+
+    let name =
+        document.getElementById(
+            "groupName"
+        ).value;
+
+
+    if (!name) {
+
+        alert(
+            "Group name enter karo"
+        );
+
+        return;
+    }
+
+
+    let form =
+        new FormData();
+
+    form.append(
+        "group_name",
+        name
+    );
+
+
+    let response =
+        await fetch(
+            "/create_group",
+            {
+                method: "POST",
+                body: form
+            }
+        );
+
+
+    let data =
+        await response.json();
+
+
+    document.getElementById(
+        "newGroup"
+    ).innerHTML =
+        "<p>Group created!</p>"
+        +
+        "<b>"
+        + data.group_id
+        + "</b>";
+
+}
+
+
+// ======================
+// GROUP LIST
+// ======================
+
+async function loadGroups() {
+
+    let response =
+        await fetch(
+            "/groups"
+        );
+
+
+    let groups =
+        await response.json();
+
+
+    let box =
+        document.getElementById(
+            "groupList"
+        );
+
+    box.innerHTML = "";
+
+
+    groups.forEach(
+        function(g) {
+
+            box.innerHTML +=
+                "<div class='message'>"
+                + "<b>"
+                + g.group_name
+                + "</b><br>"
+                + g.group_id
+                + "</div>";
+
+        }
+    );
+
+}
+
+
+// ======================
+// QUESTION
+// ======================
+
+function askQuestion() {
+
+    let question =
+        document.getElementById(
+            "question"
+        ).value;
+
+
+    if (!question) {
+
+        alert(
+            "Question likho"
+        );
+
+        return;
+    }
+
+
+    document.getElementById(
+        "questionResult"
+    ).innerHTML =
+        "<div class='message'>"
+        + "<b>Question:</b><br>"
+        + question
+        + "<br><br>"
+        + "AI Question Solver "
+        + "next version mein connect "
+        + "kiya jayega."
+        + "</div>";
+
+}
+
+
+// ======================
+// AUTO CHAT REFRESH
+// ======================
+
+setInterval(
+    loadChat,
+    3000
+);
+
+
+</script>
+
+</body>
+
+</html>
+
+"""
+
+
+@app.route("/")
+def website():
+
+    return render_template_string(
+        HTML
+    )
+
+
+# =========================
+# PHOTO FILES
+# =========================
+
+@app.route("/uploads/<filename>")
+def uploaded_file(filename):
+
+    from flask import send_from_directory
+
+    return send_from_directory(
+        UPLOADS,
+        filename
+    )
+
+
+# =========================
+# START SERVER
+# =========================
+
+setup_database()
+
+app.run(
+    host="0.0.0.0",
+    port=5000,
+    debug=False
+)
