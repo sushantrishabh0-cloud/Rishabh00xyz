@@ -1,0 +1,1196 @@
+from flask import Flask, request, jsonify, render_template_string
+import sqlite3
+import uuid
+import os
+
+app = Flask(__name__)
+
+DB = "simmiii.db"
+UPLOAD_FOLDER = "uploads"
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+# =========================
+# DATABASE
+# =========================
+
+def get_db():
+    con = sqlite3.connect(DB)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def setup():
+
+    con = get_db()
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            simmiii_id TEXT UNIQUE
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT,
+            receiver TEXT,
+            status TEXT DEFAULT 'pending'
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS friends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user1 TEXT,
+            user2 TEXT
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT,
+            receiver TEXT,
+            message TEXT,
+            photo TEXT
+        )
+    """)
+
+    con.commit()
+    con.close()
+
+
+# =========================
+# CREATE USER
+# =========================
+
+@app.route("/create_user")
+def create_user():
+
+    user_id = "SIM-" + uuid.uuid4().hex[:8].upper()
+
+    con = get_db()
+
+    con.execute(
+        "INSERT INTO users (simmiii_id) VALUES (?)",
+        (user_id,)
+    )
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "success": True,
+        "id": user_id
+    })
+
+
+# =========================
+# SEARCH USER
+# =========================
+
+@app.route("/search_user/<user_id>")
+def search_user(user_id):
+
+    con = get_db()
+
+    user = con.execute(
+        "SELECT simmiii_id FROM users WHERE simmiii_id=?",
+        (user_id.upper(),)
+    ).fetchone()
+
+    con.close()
+
+    if user:
+        return jsonify({
+            "found": True,
+            "id": user["simmiii_id"]
+        })
+
+    return jsonify({
+        "found": False
+    })
+
+
+# =========================
+# SEND FRIEND REQUEST
+# =========================
+
+@app.route("/add_friend", methods=["POST"])
+def add_friend():
+
+    sender = request.form.get("sender")
+    receiver = request.form.get("receiver")
+
+    if not sender or not receiver:
+        return jsonify({
+            "success": False,
+            "message": "ID missing"
+        })
+
+    if sender == receiver:
+        return jsonify({
+            "success": False,
+            "message": "Apne aap ko add nahi kar sakte"
+        })
+
+    con = get_db()
+
+    user = con.execute(
+        "SELECT * FROM users WHERE simmiii_id=?",
+        (receiver,)
+    ).fetchone()
+
+    if not user:
+        con.close()
+
+        return jsonify({
+            "success": False,
+            "message": "User nahi mila"
+        })
+
+    already = con.execute("""
+        SELECT * FROM friends
+        WHERE
+        (user1=? AND user2=?)
+        OR
+        (user1=? AND user2=?)
+    """, (
+        sender,
+        receiver,
+        receiver,
+        sender
+    )).fetchone()
+
+    if already:
+
+        con.close()
+
+        return jsonify({
+            "success": False,
+            "message": "Already friends"
+        })
+
+
+    pending = con.execute("""
+        SELECT * FROM requests
+        WHERE
+        sender=? AND receiver=?
+        AND status='pending'
+    """, (
+        sender,
+        receiver
+    )).fetchone()
+
+
+    if pending:
+
+        con.close()
+
+        return jsonify({
+            "success": False,
+            "message": "Request already sent"
+        })
+
+
+    con.execute("""
+        INSERT INTO requests
+        (sender, receiver, status)
+        VALUES (?, ?, 'pending')
+    """, (
+        sender,
+        receiver
+    ))
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "success": True,
+        "message": "Friend request sent"
+    })
+
+
+# =========================
+# REQUESTS
+# =========================
+
+@app.route("/requests/<user_id>")
+def requests(user_id):
+
+    con = get_db()
+
+    rows = con.execute("""
+        SELECT * FROM requests
+        WHERE receiver=? AND status='pending'
+        ORDER BY id DESC
+    """, (
+        user_id
+    )).fetchall()
+
+    con.close()
+
+    return jsonify([
+        dict(x) for x in rows
+    ])
+
+
+# =========================
+# ACCEPT REQUEST
+# =========================
+
+@app.route("/accept", methods=["POST"])
+def accept():
+
+    request_id = request.form.get("request_id")
+
+    con = get_db()
+
+    req = con.execute(
+        "SELECT * FROM requests WHERE id=?",
+        (request_id,)
+    ).fetchone()
+
+    if not req:
+
+        con.close()
+
+        return jsonify({
+            "success": False
+        })
+
+
+    con.execute("""
+        UPDATE requests
+        SET status='accepted'
+        WHERE id=?
+    """, (
+        request_id
+    ))
+
+
+    con.execute("""
+        INSERT INTO friends
+        (user1, user2)
+        VALUES (?, ?)
+    """, (
+        req["sender"],
+        req["receiver"]
+    ))
+
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "success": True
+    })
+
+
+# =========================
+# FRIEND LIST
+# =========================
+
+@app.route("/friends/<user_id>")
+def friend_list(user_id):
+
+    con = get_db()
+
+    rows = con.execute("""
+        SELECT user1, user2
+        FROM friends
+        WHERE user1=? OR user2=?
+        ORDER BY id DESC
+    """, (
+        user_id,
+        user_id
+    )).fetchall()
+
+    con.close()
+
+    result = []
+
+    for row in rows:
+
+        if row["user1"] == user_id:
+            friend = row["user2"]
+        else:
+            friend = row["user1"]
+
+        result.append({
+            "id": friend
+        })
+
+    return jsonify(result)
+
+
+# =========================
+# SEND MESSAGE
+# =========================
+
+@app.route("/send_message", methods=["POST"])
+def send_message():
+
+    sender = request.form.get("sender")
+    receiver = request.form.get("receiver")
+    message = request.form.get("message", "")
+
+    photo = ""
+
+    if "photo" in request.files:
+
+        file = request.files["photo"]
+
+        if file.filename:
+
+            filename = (
+                uuid.uuid4().hex
+                + "_"
+                + file.filename
+            )
+
+            path = os.path.join(
+                UPLOAD_FOLDER,
+                filename
+            )
+
+            file.save(path)
+
+            photo = "/uploads/" + filename
+
+
+    con = get_db()
+
+    con.execute("""
+        INSERT INTO messages
+        (sender, receiver, message, photo)
+        VALUES (?, ?, ?, ?)
+    """, (
+        sender,
+        receiver,
+        message,
+        photo
+    ))
+
+    con.commit()
+    con.close()
+
+    return jsonify({
+        "success": True
+    })
+
+
+# =========================
+# GET CHAT
+# =========================
+
+@app.route("/chat/<user1>/<user2>")
+def chat(user1, user2):
+
+    con = get_db()
+
+    rows = con.execute("""
+        SELECT *
+        FROM messages
+        WHERE
+        (sender=? AND receiver=?)
+        OR
+        (sender=? AND receiver=?)
+        ORDER BY id ASC
+    """, (
+        user1,
+        user2,
+        user2,
+        user1
+    )).fetchall()
+
+    con.close()
+
+    return jsonify([
+        dict(x) for x in rows
+    ])
+
+
+# =========================
+# WEBSITE
+# =========================
+
+HTML = """
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width,initial-scale=1">
+
+<title>Simmiii</title>
+
+<style>
+
+*{
+    box-sizing:border-box;
+}
+
+body{
+    margin:0;
+    font-family:Arial;
+    background:#f5f5f7;
+    color:#222;
+}
+
+.header{
+    background:linear-gradient(
+        135deg,
+        #6c4cff,
+        #9a5cff
+    );
+
+    color:white;
+    padding:20px;
+    text-align:center;
+    font-size:28px;
+    font-weight:bold;
+}
+
+.container{
+    max-width:650px;
+    margin:auto;
+    padding:15px;
+}
+
+.card{
+    background:white;
+    padding:18px;
+    margin-bottom:15px;
+    border-radius:18px;
+    box-shadow:0 4px 15px #0001;
+}
+
+input{
+    width:100%;
+    padding:12px;
+    margin:7px 0;
+    border:1px solid #ddd;
+    border-radius:10px;
+}
+
+button{
+    border:0;
+    padding:11px 16px;
+    border-radius:10px;
+    background:#6c4cff;
+    color:white;
+    font-weight:bold;
+}
+
+.id{
+    color:#6c4cff;
+    font-size:20px;
+    font-weight:bold;
+}
+
+.user{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    padding:12px;
+    margin:8px 0;
+    background:#f3f1ff;
+    border-radius:13px;
+}
+
+.avatar{
+    width:45px;
+    height:45px;
+    border-radius:14px;
+    background:#6c4cff;
+    color:white;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-weight:bold;
+}
+
+.message{
+    background:#eee;
+    padding:10px;
+    margin:7px 0;
+    border-radius:12px;
+}
+
+.mine{
+    background:#ded5ff;
+}
+
+img{
+    max-width:100%;
+    border-radius:10px;
+}
+
+.chatbox{
+    max-height:350px;
+    overflow-y:auto;
+}
+
+</style>
+
+</head>
+
+<body>
+
+
+<div class="header">
+💜 Simmiii
+</div>
+
+
+<div class="container">
+
+
+<!-- MY ID -->
+
+<div class="card">
+
+<h3>🆔 My Simmiii ID</h3>
+
+<div class="id" id="myID">
+Creating...
+</div>
+
+</div>
+
+
+<!-- ADD FRIEND -->
+
+<div class="card">
+
+<h3>🔍 Find Friend</h3>
+
+<input
+id="searchID"
+placeholder="Enter Simmiii ID">
+
+<button onclick="findUser()">
+Search
+</button>
+
+<div id="searchResult"></div>
+
+</div>
+
+
+<!-- REQUESTS -->
+
+<div class="card">
+
+<h3>🤝 Friend Requests</h3>
+
+<button onclick="loadRequests()">
+Refresh
+</button>
+
+<div id="requests"></div>
+
+</div>
+
+
+<!-- FRIENDS -->
+
+<div class="card">
+
+<h3>👥 My Friends</h3>
+
+<button onclick="loadFriends()">
+Refresh Friends
+</button>
+
+<div id="friends"></div>
+
+</div>
+
+
+<!-- CHAT -->
+
+<div class="card">
+
+<h3>💬 Chat</h3>
+
+<div id="chatWith">
+Select a friend
+</div>
+
+<div
+id="chat"
+class="chatbox">
+</div>
+
+<input
+id="message"
+placeholder="Write message...">
+
+<input
+id="photo"
+type="file"
+accept="image/*">
+
+<button onclick="sendMessage()">
+Send
+</button>
+
+</div>
+
+
+</div>
+
+
+<script>
+
+
+// ========================
+// USER
+// ========================
+
+let myID =
+localStorage.getItem(
+    "simmiii_id"
+);
+
+let currentFriend = null;
+
+
+async function createUser(){
+
+    let r =
+        await fetch(
+            "/create_user"
+        );
+
+    let data =
+        await r.json();
+
+    myID = data.id;
+
+    localStorage.setItem(
+        "simmiii_id",
+        myID
+    );
+
+    showID();
+}
+
+
+function showID(){
+
+    document.getElementById(
+        "myID"
+    ).innerText = myID;
+
+}
+
+
+if(!myID){
+
+    createUser();
+
+}else{
+
+    showID();
+
+}
+
+
+// ========================
+// FIND USER
+// ========================
+
+async function findUser(){
+
+    let id =
+        document.getElementById(
+            "searchID"
+        ).value
+        .trim()
+        .toUpperCase();
+
+
+    if(!id){
+
+        alert(
+            "Simmiii ID enter karo"
+        );
+
+        return;
+    }
+
+
+    let r =
+        await fetch(
+            "/search_user/"
+            + id
+        );
+
+
+    let data =
+        await r.json();
+
+
+    let box =
+        document.getElementById(
+            "searchResult"
+        );
+
+
+    if(data.found){
+
+        box.innerHTML =
+
+            "<div class='user'>"
+
+            + "<div class='avatar'>S</div>"
+
+            + "<div style='flex:1'>"
+
+            + "<b>"
+            + data.id
+            + "</b>"
+
+            + "</div>"
+
+            + "<button onclick="
+            + "addFriend('"
+            + data.id
+            + "')>"
+            + "Add Friend"
+            + "</button>"
+
+            + "</div>";
+
+    }else{
+
+        box.innerHTML =
+            "<p>User nahi mila.</p>";
+
+    }
+
+}
+
+
+// ========================
+// ADD FRIEND
+// ========================
+
+async function addFriend(friendID){
+
+    let form =
+        new FormData();
+
+    form.append(
+        "sender",
+        myID
+    );
+
+    form.append(
+        "receiver",
+        friendID
+    );
+
+
+    let r =
+        await fetch(
+            "/add_friend",
+            {
+                method:"POST",
+                body:form
+            }
+        );
+
+
+    let data =
+        await r.json();
+
+
+    alert(
+        data.message
+    );
+
+}
+
+
+// ========================
+// REQUESTS
+// ========================
+
+async function loadRequests(){
+
+    let r =
+        await fetch(
+            "/requests/"
+            + myID
+        );
+
+
+    let data =
+        await r.json();
+
+
+    let box =
+        document.getElementById(
+            "requests"
+        );
+
+    box.innerHTML = "";
+
+
+    if(data.length === 0){
+
+        box.innerHTML =
+            "<p>No new requests.</p>";
+
+        return;
+    }
+
+
+    data.forEach(
+        function(req){
+
+            box.innerHTML +=
+
+                "<div class='user'>"
+
+                + "<div class='avatar'>S</div>"
+
+                + "<div style='flex:1'>"
+
+                + "<b>"
+                + req.sender
+                + "</b>"
+
+                + "</div>"
+
+                + "<button onclick="
+                + "acceptRequest("
+                + req.id
+                + ")>"
+                + "Accept"
+                + "</button>"
+
+                + "</div>";
+
+        }
+    );
+
+}
+
+
+// ========================
+// ACCEPT
+// ========================
+
+async function acceptRequest(id){
+
+    let form =
+        new FormData();
+
+    form.append(
+        "request_id",
+        id
+    );
+
+
+    await fetch(
+        "/accept",
+        {
+            method:"POST",
+            body:form
+        }
+    );
+
+
+    loadRequests();
+    loadFriends();
+
+}
+
+
+// ========================
+// FRIEND LIST
+// ========================
+
+async function loadFriends(){
+
+    let r =
+        await fetch(
+            "/friends/"
+            + myID
+        );
+
+
+    let data =
+        await r.json();
+
+
+    let box =
+        document.getElementById(
+            "friends"
+        );
+
+    box.innerHTML = "";
+
+
+    if(data.length === 0){
+
+        box.innerHTML =
+            "<p>Abhi koi friend nahi hai.</p>";
+
+        return;
+    }
+
+
+    data.forEach(
+        function(friend){
+
+            box.innerHTML +=
+
+                "<div class='user'>"
+
+                + "<div class='avatar'>S</div>"
+
+                + "<div style='flex:1'>"
+
+                + "<b>"
+                + friend.id
+                + "</b>"
+
+                + "</div>"
+
+                + "<button onclick="
+                + "openChat('"
+                + friend.id
+                + "')>"
+                + "Chat"
+                + "</button>"
+
+                + "</div>";
+
+        }
+    );
+
+}
+
+
+// ========================
+// OPEN CHAT
+// ========================
+
+function openChat(friendID){
+
+    currentFriend = friendID;
+
+    document.getElementById(
+        "chatWith"
+    ).innerHTML =
+        "Chatting with <b>"
+        + friendID
+        + "</b>";
+
+    loadChat();
+
+}
+
+
+// ========================
+// LOAD CHAT
+// ========================
+
+async function loadChat(){
+
+    if(!currentFriend)
+        return;
+
+
+    let r =
+        await fetch(
+            "/chat/"
+            + myID
+            + "/"
+            + currentFriend
+        );
+
+
+    let data =
+        await r.json();
+
+
+    let box =
+        document.getElementById(
+            "chat"
+        );
+
+    box.innerHTML = "";
+
+
+    data.forEach(
+        function(m){
+
+            box.innerHTML +=
+
+                "<div class='message "
+                + (
+                    m.sender === myID
+                    ? "mine"
+                    : ""
+                )
+                + "'>"
+
+                + "<b>"
+                + m.sender
+                + "</b><br>"
+
+                + m.message;
+
+
+            if(m.photo){
+
+                box.innerHTML +=
+
+                    "<br><img src='"
+                    + m.photo
+                    + "'>";
+
+            }
+
+
+            box.innerHTML +=
+                "</div>";
+
+        }
+    );
+
+}
+
+
+// ========================
+// SEND MESSAGE
+// ========================
+
+async function sendMessage(){
+
+    if(!currentFriend){
+
+        alert(
+            "Pehle friend select karo"
+        );
+
+        return;
+    }
+
+
+    let message =
+        document.getElementById(
+            "message"
+        ).value;
+
+
+    let photo =
+        document.getElementById(
+            "photo"
+        ).files[0];
+
+
+    let form =
+        new FormData();
+
+    form.append(
+        "sender",
+        myID
+    );
+
+    form.append(
+        "receiver",
+        currentFriend
+    );
+
+    form.append(
+        "message",
+        message
+    );
+
+
+    if(photo){
+
+        form.append(
+            "photo",
+            photo
+        );
+
+    }
+
+
+    await fetch(
+        "/send_message",
+        {
+            method:"POST",
+            body:form
+        }
+    );
+
+
+    document.getElementById(
+        "message"
+    ).value = "";
+
+
+    loadChat();
+
+}
+
+
+// AUTO REFRESH CHAT
+
+setInterval(
+    loadChat,
+    3000
+);
+
+
+</script>
+
+</body>
+
+</html>
+"""
+
+
+@app.route("/")
+def home():
+    return render_template_string(HTML)
+
+
+@app.route("/uploads/<filename>")
+def uploads(filename):
+
+    from flask import send_from_directory
+
+    return send_from_directory(
+        UPLOAD_FOLDER,
+        filename
+    )
+
+
+# =========================
+# START
+# =========================
+
+setup()
+
+app.run(
+    host="0.0.0.0",
+    port=5000,
+    debug=False
+)
